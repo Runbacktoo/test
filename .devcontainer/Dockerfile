@@ -1,6 +1,5 @@
-FROM rockylinux:8.10
+FROM rockylinux:8
 
-# 基础工具
 RUN dnf update -y && \
     dnf install -y \
         sudo \
@@ -11,9 +10,9 @@ RUN dnf update -y && \
         which \
         tar \
         gzip \
+        dnf-plugins-core \
     && dnf clean all
 
-# 创建非 root 用户（Codespaces 要求）
 ARG USERNAME=vscode
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
