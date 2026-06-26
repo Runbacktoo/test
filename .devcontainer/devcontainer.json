@@ -1,0 +1,16 @@
+{
+  "name": "Rocky Linux 8.10",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  "features": {},
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  },
+  "postCreateCommand": "echo 'Rocky Linux 8.10 ready!'"
+}
