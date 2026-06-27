@@ -12,20 +12,16 @@
 
 set -euo pipefail
 
-# ==================== 颜色定义 ====================
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-# ==================== 路径定义 ====================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="${SCRIPT_DIR}/logs"
 LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
 PKG_DIR="${SCRIPT_DIR}/packages"
 CONFIG_DIR="${SCRIPT_DIR}/config"
-# 安装清单：记录本脚本创建的所有内容，供 --cleanup 使用
 MANIFEST="${SCRIPT_DIR}/.install_manifest"
 
-# ==================== 安装配置 ====================
 DB_HOST="localhost"
 DB_PORT="3306"
 DB_NAME="zabbix"
@@ -38,7 +34,6 @@ ZBX_SERVER_PORT="10051"
 PHP_TIMEZONE="Asia/Shanghai"
 ZBX_VERSION="7.4"
 
-# ==================== 工具函数 ====================
 mkdir -p "${LOG_DIR}"
 
 log() {
@@ -55,11 +50,7 @@ log() {
 }
 
 die() { log ERROR "$1"; log ERROR "失败，请查看日志: ${LOG_FILE}"; exit 1; }
-
-# 向清单追加一条记录，格式: TYPE:VALUE
 manifest_add() { echo "$1:$2" >> "${MANIFEST}"; }
-
-# 检查清单中是否已有某条记录
 manifest_has() { grep -qxF "$1:$2" "${MANIFEST}" 2>/dev/null; }
 
 check_root() {
@@ -122,7 +113,6 @@ detect_install_mode() {
     fi
 }
 
-# ==================== Step 1: 系统准备 ====================
 step_prepare_system() {
     log STEP "Step 1: 系统环境准备"
 
@@ -149,11 +139,9 @@ step_prepare_system() {
     done
 }
 
-# ==================== Step 2: 安装 MySQL ====================
 step_install_mysql() {
     log STEP "Step 2: 安装 MySQL 8.0"
 
-    # 幂等：MySQL 已在运行则跳过安装
     if systemctl is-active --quiet mysqld 2>/dev/null; then
         log INFO "MySQL 已在运行，跳过安装"
     else
@@ -170,28 +158,38 @@ step_install_mysql() {
         manifest_add PKG mysql-community-server
         systemctl enable mysqld
         systemctl start mysqld
+        sleep 3
         log INFO "MySQL 服务已启动"
     fi
 
-    # 幂等：优先用用户提供的密码测试连通，已可用则跳过初始化
+    # 优先用用户提供的密码测试，已可用则跳过初始化
     if mysql -uroot -p"${DB_ROOT_PASSWORD}" -e "SELECT 1;" &>/dev/null 2>&1; then
         log INFO "MySQL root 密码已就绪，跳过初始化"
         return 0
     fi
 
-    # 尝试用临时密码初始化
     local tmp_pass
     tmp_pass=$(grep 'temporary password' /var/log/mysqld.log 2>/dev/null \
         | awk '{print $NF}' | tail -1 || echo "")
 
     if [[ -n "${tmp_pass}" ]]; then
-        log INFO "使用临时密码初始化 root..."
-        mysql --connect-expired-password -uroot -p"${tmp_pass}" 2>>"${LOG_FILE}" << EOF
+        log INFO "使用 skip-grant-tables 模式初始化 root 密码..."
+        # --connect-expired-password 下不允许 SET GLOBAL，必须用 skip-grant-tables 绕过
+        systemctl stop mysqld
+        echo -e "[mysqld]\nskip-grant-tables\nskip-networking" \
+            > /etc/my.cnf.d/tmp-skip-grant.cnf
+        systemctl start mysqld
+        sleep 3
+        mysql -uroot 2>>"${LOG_FILE}" << EOF
+FLUSH PRIVILEGES;
 SET GLOBAL validate_password.policy=LOW;
 SET GLOBAL validate_password.length=8;
 ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASSWORD}';
 FLUSH PRIVILEGES;
 EOF
+        rm -f /etc/my.cnf.d/tmp-skip-grant.cnf
+        systemctl restart mysqld
+        sleep 3
     else
         log INFO "无临时密码，直接设置 root 密码..."
         mysql -uroot 2>>"${LOG_FILE}" << EOF || true
@@ -202,13 +200,11 @@ FLUSH PRIVILEGES;
 EOF
     fi
 
-    # 验证密码是否设置成功
     mysql -uroot -p"${DB_ROOT_PASSWORD}" -e "SELECT 1;" &>/dev/null 2>&1 \
         || die "MySQL root 密码设置失败，请检查日志"
     log INFO "MySQL root 密码设置成功"
 }
 
-# ==================== Step 3: 创建数据库 ====================
 step_create_database() {
     log STEP "Step 3: 创建 Zabbix 数据库"
 
@@ -233,11 +229,9 @@ EOF
     fi
 }
 
-# ==================== Step 4: 安装 Zabbix ====================
 step_install_zabbix() {
     log STEP "Step 4: 安装 Zabbix 7.4"
 
-    # 幂等：zabbix-server 已安装则跳过
     if rpm -q zabbix-server-mysql &>/dev/null; then
         log INFO "Zabbix 包已安装，跳过"
         return 0
@@ -272,7 +266,6 @@ step_install_zabbix() {
     log INFO "Zabbix 包安装完成"
 }
 
-# ==================== Step 5: 导入 Schema ====================
 step_import_schema() {
     log STEP "Step 5: 导入 Zabbix 数据库 Schema"
 
@@ -300,14 +293,12 @@ EOF
     log INFO "Schema 导入完成"
 }
 
-# ==================== Step 6: 配置 Zabbix Server ====================
 step_configure_server() {
     log STEP "Step 6: 配置 Zabbix Server"
 
     local conf="/etc/zabbix/zabbix_server.conf"
     [[ -f "${conf}" ]] || die "找不到配置文件: ${conf}"
 
-    # 幂等：有备份说明已配置过，跳过
     if [[ -f "${conf}.bak" ]]; then
         log INFO "zabbix_server.conf 已配置过，跳过"
         return 0
@@ -338,7 +329,6 @@ step_configure_server() {
     log INFO "Zabbix Server 配置完成"
 }
 
-# ==================== Step 7: 配置 Nginx + PHP ====================
 step_configure_nginx() {
     log STEP "Step 7: 配置 Nginx 和 PHP-FPM"
 
@@ -356,7 +346,6 @@ step_configure_nginx() {
 
     local nginx_conf="/etc/nginx/conf.d/zabbix.conf"
 
-    # 幂等：配置文件已存在则跳过
     if [[ -f "${nginx_conf}" ]]; then
         log INFO "Nginx zabbix.conf 已存在，跳过"
     else
@@ -405,7 +394,6 @@ NGINX_CONF
         manifest_add FILE "${nginx_conf}"
     fi
 
-    # 注释掉 nginx.conf 里默认的 80 端口 server 块（幂等：已注释则跳过）
     if [[ -f /etc/nginx/nginx.conf ]] && ! [[ -f /etc/nginx/nginx.conf.bak ]]; then
         cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
         sed -i '/^    server {/,/^    }/{ /listen.*80.*default_server/s/^/# / }' \
@@ -422,7 +410,6 @@ NGINX_CONF
     log INFO "Nginx 和 PHP-FPM 配置完成"
 }
 
-# ==================== Step 8: 配置 Frontend ====================
 step_configure_frontend() {
     log STEP "Step 8: 配置 Zabbix Frontend"
 
@@ -430,7 +417,6 @@ step_configure_frontend() {
     local zabbix_conf="${web_conf_dir}/zabbix.conf.php"
     mkdir -p "${web_conf_dir}"
 
-    # 幂等：配置文件已存在则跳过
     if [[ -f "${zabbix_conf}" ]]; then
         log INFO "zabbix.conf.php 已存在，跳过"
         return 0
@@ -477,7 +463,6 @@ PHP_CONF
     log INFO "Frontend 配置完成"
 }
 
-# ==================== Step 9: 配置 Agent 2 ====================
 step_configure_agent() {
     log STEP "Step 9: 配置 Zabbix Agent 2"
 
@@ -502,7 +487,6 @@ step_configure_agent() {
     log INFO "Agent 2 配置完成"
 }
 
-# ==================== Step 10: 启动服务 ====================
 step_start_services() {
     log STEP "Step 10: 启动所有服务"
 
@@ -520,7 +504,6 @@ step_start_services() {
     done
 }
 
-# ==================== Step 11: 验证 ====================
 step_verify() {
     log STEP "Step 11: 安装验证"
     local all_ok=true
@@ -552,7 +535,6 @@ step_verify() {
         || log WARN "部分检查失败，请查看上方警告"
 }
 
-# ==================== 完成展示 ====================
 show_completion() {
     local ip_addr
     ip_addr=$(ip route get 1 2>/dev/null | awk '{print $7;exit}' || hostname -I | awk '{print $1}')
@@ -572,7 +554,6 @@ EOF
     echo -e "${YELLOW}⚠️  首次登录后请立即修改默认密码！${NC}\n"
 }
 
-# ==================== 清理模式 ====================
 do_cleanup() {
     echo -e "${RED}"
     echo "=========================================="
@@ -586,7 +567,6 @@ do_cleanup() {
     read -rp "确认清理? 此操作不可恢复 (yes/no): " answer
     [[ "${answer}" == "yes" ]] || { echo "已取消"; exit 0; }
 
-    # 停止并禁用服务
     while IFS=: read -r type value; do
         [[ "${type}" == "SVC" ]] || continue
         if systemctl is-active --quiet "${value}" 2>/dev/null; then
@@ -595,7 +575,6 @@ do_cleanup() {
         fi
     done < "${MANIFEST}"
 
-    # 删除数据库和用户（需要 root 密码）
     if grep -q "^DB:" "${MANIFEST}" || grep -q "^DBUSER:" "${MANIFEST}"; then
         read -rsp "请输入 MySQL root 密码以删除数据库和用户: " _root_pass; echo
         while IFS=: read -r type value; do
@@ -611,7 +590,6 @@ do_cleanup() {
         done < "${MANIFEST}"
     fi
 
-    # 删除本脚本创建的文件
     while IFS=: read -r type value; do
         [[ "${type}" == "FILE" ]] || continue
         if [[ -f "${value}" ]]; then
@@ -619,7 +597,6 @@ do_cleanup() {
         fi
     done < "${MANIFEST}"
 
-    # 卸载 Zabbix 包（不卸载 MySQL/PHP，避免影响其他环境）
     if grep -q "^PKG:zabbix" "${MANIFEST}"; then
         dnf remove -y zabbix-server-mysql zabbix-web-mysql zabbix-nginx-conf \
             zabbix-sql-scripts zabbix-selinux-policy zabbix-agent2 zabbix-web \
@@ -638,7 +615,6 @@ do_cleanup() {
     echo "清理完成，安装清单已删除"
 }
 
-# ==================== 主流程 ====================
 main() {
     if [[ "${1:-}" == "--cleanup" ]]; then
         check_root
